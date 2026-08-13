@@ -530,6 +530,17 @@
               <span>Strength</span>
               <input type="range" id="ditheringStrength" min="0" max="100" value="10">
             </div>
+            <div class="span-group">
+              <span>Dither Mode:</span>
+              <select id="ditherMode">
+                <option value="adaptive" selected>Adaptive</option>
+                <option value="uniform">Uniform</option>
+              </select>
+            </div>
+            <div class="slider-container" id="edgeProtectionGroup">
+              <span>Edge Protection</span>
+              <input type="range" id="edgeProtection" min="0" max="100" value="75">
+            </div>
           </div>
         </div>
         <div class="setting-group">
@@ -702,6 +713,14 @@
         const paletteNameInput = document.getElementById('paletteInput');
         const ditheringSelect = document.getElementById('dithering');
         const ditheringStrengthInput = document.getElementById('ditheringStrength');
+        const ditherModeSelect = document.getElementById('ditherMode');
+        const edgeProtectionInput = document.getElementById('edgeProtection');
+        const edgeProtectionGroup = document.getElementById('edgeProtectionGroup');
+
+        function updateDitherModeControls() {
+            edgeProtectionGroup.style.display = ditherModeSelect.value === 'adaptive' ? '' : 'none';
+        }
+        updateDitherModeControls();
 
         // Multi-image support elements
         const imageListPanel = document.getElementById('imageListPanel');
@@ -1082,6 +1101,8 @@
             const paletteName = paletteNameInput.value.trim();
             const ditheringMethod = ditheringSelect.value;
             const ditheringStrength = parseInt(ditheringStrengthInput.value);
+            const adaptiveDither = ditherModeSelect.value === 'adaptive';
+            const edgeProtection = parseInt(edgeProtectionInput.value);
 
             let palette = null;
             if (paletteName) {
@@ -1102,6 +1123,8 @@
                 dither: ditheringMethod,
                 strength: ditheringStrength,
                 palette: paletteToUse,
+                adaptive: adaptiveDither,
+                edgeProtection,
                 resolution: 'pixel',
             };
 
@@ -1145,6 +1168,13 @@
         ditheringStrengthInput.addEventListener('input', () => {
             if (autoPixelateEnabled) applyPixelation();
         });
+        ditherModeSelect.addEventListener('change', () => {
+            updateDitherModeControls();
+            if (autoPixelateEnabled) applyPixelation();
+        });
+        edgeProtectionInput.addEventListener('input', () => {
+            if (autoPixelateEnabled) applyPixelation();
+        });
         paletteNameInput.addEventListener('input', () => {
             if (autoPixelateEnabled) applyPixelation();
         });
@@ -1175,6 +1205,8 @@
             const paletteName = paletteNameInput.value.trim();
             const ditheringMethod = ditheringSelect.value;
             const ditheringStrength = parseInt(ditheringStrengthInput.value);
+            const adaptiveDither = ditherModeSelect.value === 'adaptive';
+            const edgeProtection = parseInt(edgeProtectionInput.value);
 
             let palette = null;
             if (paletteName) {
@@ -1194,6 +1226,8 @@
                 dither: ditheringMethod,
                 strength: ditheringStrength,
                 palette: paletteToUse,
+                adaptive: adaptiveDither,
+                edgeProtection,
                 resolution: 'original',
             };
 

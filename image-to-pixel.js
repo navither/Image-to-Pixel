@@ -6,6 +6,8 @@
  * @param {string} [options.dither='none'] - Dithering method: 'none', 'Floyd-Steinberg', 'ordered', '2x2 Bayer', '4x4 Bayer'.
  * @param {number} [options.strength=0] - Dithering strength (0-100).
  * @param {string|Array} [options.palette=null] - Palette name from Lospec or an array of colors.
+ * @param {boolean} [options.adaptive=false] - Adapt dithering to quantization error and image edges.
+ * @param {number} [options.edgeProtection=75] - Edge protection strength (0-100) in adaptive mode.
  * @param {string} [options.resolution='original'] - 'pixel' for pixelated size, 'original' for original size.
  * @returns {Promise<HTMLCanvasElement|p5.Image|Q5.Image>} - A promise that resolves to a canvas element, p5.Image, or Q5.Image object.
  */
@@ -16,6 +18,8 @@ async function pixelate(options) {
         dither = 'none',
         strength = 0,
         palette = null,
+        adaptive = false,
+        edgeProtection = 75,
         resolution = 'original',
     } = options;
 
@@ -81,25 +85,29 @@ async function pixelate(options) {
     // Get image data for manipulation
     let pixelatedData = offscreenCtx.getImageData(0, 0, pixelsWide, pixelsHigh);
 
-    // Apply dithering and palette
+    // Apply dithering and palette. Adaptive weights suppress noise near exact
+    // palette matches and strong edges while preserving it in smooth gradients.
     const ditheringStrength = strength / 100; // Normalize strength to 0-1 range
+    const adaptiveWeights = adaptive && paletteColors && dither.toLowerCase() !== 'none'
+        ? buildAdaptiveDitherWeights(pixelatedData, pixelsWide, pixelsHigh, paletteColors, edgeProtection / 100)
+        : null;
     if (paletteColors && dither.toLowerCase() !== 'none') {
         if (dither.toLowerCase() === 'floyd-steinberg') {
-            pixelatedData = floydSteinbergDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors);
+            pixelatedData = floydSteinbergDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, adaptiveWeights);
         } else if (dither.toLowerCase() === 'ordered') {
             const bayerMatrix = getBayerMatrix('8x8');
-            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, bayerMatrix);
+            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, bayerMatrix, adaptiveWeights);
         } else if (dither.toLowerCase() === '4x4 bayer') {
             const bayerMatrix = getBayerMatrix('4x4');
-            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, bayerMatrix);
+            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, bayerMatrix, adaptiveWeights);
         } else if (dither.toLowerCase() === '2x2 bayer') {
             const bayerMatrix = getBayerMatrix('2x2');
-            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, bayerMatrix);
+            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, bayerMatrix, adaptiveWeights);
         } else if (dither.toLowerCase() === 'clustered 4x4') {
             const clusteredMatrix = getBayerMatrix('clustered 4x4');
-            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, clusteredMatrix);
+            pixelatedData = orderedDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, clusteredMatrix, adaptiveWeights);
         } else if (dither.toLowerCase() === 'atkinson') {
-            pixelatedData = atkinsonDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors);
+            pixelatedData = atkinsonDithering(pixelatedData, pixelsWide, pixelsHigh, ditheringStrength, paletteColors, adaptiveWeights);
         } else {
             throw new Error(`Unknown dithering method: ${dither}`);
         }
@@ -337,6 +345,7 @@ function hexToRgb(hex) {
 function applyPalette(imageData, paletteColors) {
     const data = imageData.data;
     for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] <= 8) continue;
         const color = [data[i], data[i + 1], data[i + 2]];
         const [r, g, b] = findClosestPaletteColor(color, paletteColors);
         data[i] = r;
@@ -344,34 +353,97 @@ function applyPalette(imageData, paletteColors) {
         data[i + 2] = b;
     }
 }
-function atkinsonDithering(imageData, width, height, strength, paletteColors) {
+
+function buildAdaptiveDitherWeights(imageData, width, height, paletteColors, edgeProtection) {
+    const data = imageData.data;
+    const weights = new Float32Array(width * height);
+    const protection = clamp01(edgeProtection);
+
+    const getColor = (x, y) => {
+        x = Math.max(0, Math.min(width - 1, x));
+        y = Math.max(0, Math.min(height - 1, y));
+        const idx = (y * width + x) * 4;
+        return [data[idx], data[idx + 1], data[idx + 2]];
+    };
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const pixelIndex = y * width + x;
+            const idx = pixelIndex * 4;
+            if (data[idx + 3] <= 8) {
+                weights[pixelIndex] = 0;
+                continue;
+            }
+
+            const color = [data[idx], data[idx + 1], data[idx + 2]];
+            let nearestSquared = Infinity;
+            let secondSquared = Infinity;
+            for (const paletteColor of paletteColors) {
+                const distance = colorDistance(color, paletteColor);
+                if (distance < nearestSquared) {
+                    secondSquared = nearestSquared;
+                    nearestSquared = distance;
+                } else if (distance < secondSquared) {
+                    secondSquared = distance;
+                }
+            }
+            const nearestDistance = Math.sqrt(nearestSquared);
+            const secondDistance = Number.isFinite(secondSquared) ? Math.sqrt(secondSquared) : 0;
+
+            // Prefer dithering where quantization is visible and two palette
+            // choices are similarly plausible; exact palette matches get zero.
+            const quantizationWeight = smoothstep(3, 72, nearestDistance);
+            const ambiguityWeight = secondDistance > 0
+                ? Math.sqrt(clamp01(nearestDistance / secondDistance))
+                : 0;
+            const paletteWeight = quantizationWeight * (0.35 + 0.65 * ambiguityWeight);
+
+            // A centered color gradient protects silhouettes, text and details.
+            const horizontal = Math.sqrt(colorDistance(getColor(x - 1, y), getColor(x + 1, y)));
+            const vertical = Math.sqrt(colorDistance(getColor(x, y - 1), getColor(x, y + 1)));
+            const edge = smoothstep(18, 150, Math.max(horizontal, vertical));
+            const edgeWeight = 1 - protection * edge;
+
+            weights[pixelIndex] = clamp01(paletteWeight * edgeWeight);
+        }
+    }
+
+    return weights;
+}
+
+function clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+}
+
+function smoothstep(min, max, value) {
+    const t = clamp01((value - min) / (max - min));
+    return t * t * (3 - 2 * t);
+}
+function atkinsonDithering(imageData, width, height, strength, paletteColors, adaptiveWeights = null) {
     const data = imageData.data;
     const errorBuffer = new Float32Array(data.length);
 
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = (y * width + x) * 4;
+            if (data[idx + 3] <= 8) continue;
 
-            // Get original color and add accumulated error
-            let r = data[idx] + errorBuffer[idx];
-            let g = data[idx + 1] + errorBuffer[idx + 1];
-            let b = data[idx + 2] + errorBuffer[idx + 2];
+            const pixelWeight = adaptiveWeights ? adaptiveWeights[y * width + x] : 1;
+            let r = data[idx] + errorBuffer[idx] * pixelWeight;
+            let g = data[idx + 1] + errorBuffer[idx + 1] * pixelWeight;
+            let b = data[idx + 2] + errorBuffer[idx + 2] * pixelWeight;
 
             const oldColor = [r, g, b];
-
-            // Quantize the pixel to the nearest palette color
             const newColor = findClosestPaletteColor(oldColor, paletteColors);
 
-            // Update the image data with the new color
             data[idx] = newColor[0];
             data[idx + 1] = newColor[1];
             data[idx + 2] = newColor[2];
 
-            // Calculate the quantization error
             const quantError = [
-                (r - newColor[0]) * strength,
-                (g - newColor[1]) * strength,
-                (b - newColor[2]) * strength
+                (r - newColor[0]) * strength * pixelWeight,
+                (g - newColor[1]) * strength * pixelWeight,
+                (b - newColor[2]) * strength * pixelWeight
             ];
 
             // Distribute the error to neighboring pixels
@@ -386,34 +458,31 @@ function atkinsonDithering(imageData, width, height, strength, paletteColors) {
     return imageData;
 }
 
-function floydSteinbergDithering(imageData, width, height, strength, paletteColors) {
+function floydSteinbergDithering(imageData, width, height, strength, paletteColors, adaptiveWeights = null) {
     const data = imageData.data;
     const errorBuffer = new Float32Array(data.length);
 
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = (y * width + x) * 4;
+            if (data[idx + 3] <= 8) continue;
 
-            // Get original color and add accumulated error
-            let r = data[idx] + errorBuffer[idx];
-            let g = data[idx + 1] + errorBuffer[idx + 1];
-            let b = data[idx + 2] + errorBuffer[idx + 2];
+            const pixelWeight = adaptiveWeights ? adaptiveWeights[y * width + x] : 1;
+            let r = data[idx] + errorBuffer[idx] * pixelWeight;
+            let g = data[idx + 1] + errorBuffer[idx + 1] * pixelWeight;
+            let b = data[idx + 2] + errorBuffer[idx + 2] * pixelWeight;
 
             const oldColor = [r, g, b];
-
-            // Quantize the pixel to the nearest palette color
             const newColor = findClosestPaletteColor(oldColor, paletteColors);
 
-            // Update the image data with the new color
             data[idx] = newColor[0];
             data[idx + 1] = newColor[1];
             data[idx + 2] = newColor[2];
 
-            // Calculate the quantization error
             const quantError = [
-                (r - newColor[0]) * strength,
-                (g - newColor[1]) * strength,
-                (b - newColor[2]) * strength
+                (r - newColor[0]) * strength * pixelWeight,
+                (g - newColor[1]) * strength * pixelWeight,
+                (b - newColor[2]) * strength * pixelWeight
             ];
 
             // Distribute the error to neighboring pixels
@@ -426,21 +495,23 @@ function floydSteinbergDithering(imageData, width, height, strength, paletteColo
     return imageData;
 }
 
-function orderedDithering(imageData, width, height, strength, paletteColors, bayerMatrix) {
+function orderedDithering(imageData, width, height, strength, paletteColors, bayerMatrix, adaptiveWeights = null) {
     const data = imageData.data;
     const matrixSize = bayerMatrix.length;
 
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = (y * width + x) * 4;
+            if (data[idx + 3] <= 8) continue;
             const oldColor = [data[idx], data[idx + 1], data[idx + 2]];
 
             const threshold = ((bayerMatrix[y % matrixSize][x % matrixSize] + 0.5) / (matrixSize * matrixSize)) * 255;
+            const pixelStrength = strength * (adaptiveWeights ? adaptiveWeights[y * width + x] : 1);
 
             let adjustedColor = [
-                oldColor[0] + (threshold - 127.5) * strength,
-                oldColor[1] + (threshold - 127.5) * strength,
-                oldColor[2] + (threshold - 127.5) * strength
+                oldColor[0] + (threshold - 127.5) * pixelStrength,
+                oldColor[1] + (threshold - 127.5) * pixelStrength,
+                oldColor[2] + (threshold - 127.5) * pixelStrength
             ];
 
             // Quantize the adjusted color
